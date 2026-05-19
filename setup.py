@@ -46,7 +46,7 @@ ALL_TOOL_REPOS = PY_TOOLS + PHP_TOOLS + [HARNESS]
 
 # Used only when a tool repo is missing locally and we need to bootstrap it.
 # Override per-repo by editing the dict below if you keep your own forks.
-TOOL_REPO_BASE_URL = "https://git.in.moodle.com/matt.porritt"
+TOOL_REPO_BASE_URL = f"https://{os.getenv('GIT_HTTP_USERNAME')}:{os.getenv('GIT_HTTP_TOKEN')}@git.in.moodle.com/matt.porritt"
 TOOL_REPO_OVERRIDES: dict[str, str] = {
     # "agentic_orchestrator": "https://github.com/yourname/agentic_orchestrator.git",
 }
