@@ -62,6 +62,7 @@ DEFAULT_ADMIN_USER = "admin"
 DEFAULT_ADMIN_PASS = "test"
 DEFAULT_ADMIN_EMAIL = "admin@example.com"
 DEFAULT_SITE_URL = "http://localhost:8000"
+HOST_WORKSPACE_ROOT = Path(os.environ.get("HOST_WORKSPACE_ROOT", "/Users/danielurena/Dev/agentic_ia_docker"))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -658,6 +659,8 @@ def write_vscode_workspace(state: dict) -> Path:
 def write_moodle_claude_config(state: dict) -> None:
     banner("Writing moodle_claude harness config")
     harness = AI_ROOT / HARNESS
+    host_moodle_dir = str(HOST_WORKSPACE_ROOT / "moodle_src" / "moodle")
+    host_docker_dir = str(HOST_WORKSPACE_ROOT / "moodle_src" / "moodle-docker")
 
     optional_lines = []
     if state.get("jira_base_url"):
@@ -676,11 +679,11 @@ def write_moodle_claude_config(state: dict) -> None:
 # These are exported so child processes (moodle-docker-compose) see them.
 
 export MOODLE_DIR="{state['moodle_dir']}"
-export MOODLE_DOCKER_DIR="{state['docker_dir']}"
+export MOODLE_DOCKER_DIR="{host_docker_dir}"
 export AGENTIC_ORCHESTRATOR_DIR="{AI_ROOT / 'agentic_orchestrator'}"
 
 # moodle-docker reads MOODLE_DOCKER_WWWROOT (not MOODLE_DIR) — alias it.
-export MOODLE_DOCKER_WWWROOT="{state['moodle_dir']}"
+export MOODLE_DOCKER_WWWROOT="{host_moodle_dir}"
 
 # Default DB for moodle-docker. Change to mariadb / mysqli / mssql / oci if needed.
 export MOODLE_DOCKER_DB="{state.get('moodle_docker_db', 'pgsql')}"
@@ -789,11 +792,13 @@ def prepare_moodle_for_docker(state: dict) -> bool:
 
 def docker_env(state: dict) -> dict:
     """Build an env dict with everything moodle-docker needs, exported."""
+    host_moodle_dir = str(HOST_WORKSPACE_ROOT / "moodle_src" / "moodle")
+    host_docker_dir = str(HOST_WORKSPACE_ROOT / "moodle_src" / "moodle-docker")
     return {
         **os.environ,
         "MOODLE_DIR":             state["moodle_dir"],
-        "MOODLE_DOCKER_WWWROOT":  state["moodle_dir"],
-        "MOODLE_DOCKER_DIR":      state["docker_dir"],
+        "MOODLE_DOCKER_WWWROOT":  host_moodle_dir,
+        "MOODLE_DOCKER_DIR":      host_docker_dir,
         "MOODLE_DOCKER_DB":       state.get("moodle_docker_db", "pgsql"),
     }
 
@@ -866,7 +871,7 @@ def bring_up_moodle(state: dict) -> bool:
 # phases
 # ──────────────────────────────────────────────────────────────────────────────
 
-def phase1(state: dict, rebuild: set[str]) -> dict:
+def phase1(state: dict, rebuild: set[str], manage_moodle_docker: bool) -> dict:
     """Step 1 of 2 — everything that doesn't require Moodle to be running."""
     banner("Step 1 of 2 — install tools and build static resources")
     info("This step does not need Moodle running. It installs the 5 tools,")
@@ -917,23 +922,22 @@ def phase1(state: dict, rebuild: set[str]) -> dict:
   user and crawls authenticated pages, which can only happen against a
   real running install.
 """)
-    if yes_no(
-        "Bring up Moodle now (./bin/up + ./bin/install) and continue to step 2?",
-        default=True,
-    ):
-        if bring_up_moodle(state):
-            print()
-            return phase2(state, rebuild)
-        fail("Moodle bring-up failed. Fix the issue and re-run setup.py.")
-        return state
+    if manage_moodle_docker:
+        if yes_no(
+            "Bring up Moodle now (./bin/up + ./bin/install) and continue to step 2?",
+            default=True,
+        ):
+            if bring_up_moodle(state):
+                print()
+                return phase2(state, rebuild, manage_moodle_docker)
+            fail("Moodle bring-up failed. Fix the issue and re-run setup.py.")
+            return state
 
     print(f"""
-  Manual path — bring up Moodle yourself and re-run setup.py:
+  External infra path — bring up Moodle outside setup.py and re-run setup.py:
 
-    cd {AI_ROOT / HARNESS}
-    ./bin/up && ./bin/install
-    # optional but useful for daily work:
-    ./bin/phpunit-init && ./bin/behat-init && ./bin/smoke
+    # example from this workspace root:
+    docker compose up -d
 
     cd {AI_ROOT}
     python3 setup.py
@@ -941,13 +945,13 @@ def phase1(state: dict, rebuild: set[str]) -> dict:
     return state
 
 
-def phase2(state: dict, rebuild: set[str]) -> dict:
+def phase2(state: dict, rebuild: set[str], manage_moodle_docker: bool) -> dict:
     """Step 2 of 2 — sitemap crawl + final verify. Requires Moodle running."""
     banner("Step 2 of 2 — crawl Moodle and verify")
     info("This step logs into your running Moodle, crawls authenticated")
     info("pages to build the sitemap, points the orchestrator at it, and")
     info("runs a final verify so you can see which capabilities are usable.")
-    check_system_tools(need_docker=True)
+    check_system_tools(need_docker=manage_moodle_docker)
     ensure_tool_repos_present()
 
     # Always regenerate harness config so changes to the template (e.g. new
@@ -957,12 +961,15 @@ def phase2(state: dict, rebuild: set[str]) -> dict:
 
     if not moodle_is_running(state["site_url"]):
         warn(f"Moodle is not running at {state['site_url']}.")
-        if yes_no("Bring it up now (./bin/up + ./bin/install if needed)?",
-                  default=True):
+        if manage_moodle_docker and yes_no(
+            "Bring it up now (./bin/up + ./bin/install if needed)?",
+            default=True,
+        ):
             if not bring_up_moodle(state):
                 sys.exit(1)
         else:
-            info(f"  cd {AI_ROOT / HARNESS} && ./bin/up && ./bin/install")
+            info("Bring Moodle up outside setup.py and re-run setup.py.")
+            info("Example: docker compose up -d")
             sys.exit(1)
     else:
         ok(f"Moodle reachable at {state['site_url']}")
@@ -1041,6 +1048,11 @@ def main() -> None:
     rb = sub.add_parser("rebuild", help="force rebuild of one or more resources")
     rb.add_argument("targets", nargs="+",
                     choices=["devdocs", "indexer", "sitemap", "all"])
+    parser.add_argument(
+        "--manage-moodle-docker",
+        action="store_true",
+        help="let setup.py run moodle-docker bin/up and bin/install (disabled by default)",
+    )
     args = parser.parse_args()
 
     if args.cmd == "status":
@@ -1060,17 +1072,18 @@ def main() -> None:
         return
 
     rebuild = set(getattr(args, "targets", []) or [])
+    manage_moodle_docker = bool(getattr(args, "manage_moodle_docker", False))
 
     state = load_state()
     if not state.get("phase1_complete"):
-        state = phase1(state, rebuild)
+        state = phase1(state, rebuild, manage_moodle_docker)
         # if phase1 finished and Moodle happens to already be running, continue to phase2
         if state.get("phase1_complete") and moodle_is_running(state.get("site_url", "")):
-            phase2(state, rebuild)
+            phase2(state, rebuild, manage_moodle_docker)
         return
 
     if not state.get("phase2_complete"):
-        phase2(state, rebuild)
+        phase2(state, rebuild, manage_moodle_docker)
         return
 
     # both phases complete — re-verify
