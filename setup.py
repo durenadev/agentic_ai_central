@@ -29,7 +29,6 @@ import argparse
 import getpass
 import json
 import os
-import shutil
 import subprocess
 import sys
 import urllib.request
@@ -153,7 +152,7 @@ def save_state(state: dict) -> None:
 # system checks
 # ──────────────────────────────────────────────────────────────────────────────
 
-def check_system_tools(need_docker: bool) -> None:
+def check_system_tools() -> None:
     banner("System prerequisites")
     required = [
         ("python3", ["python3", "--version"]),
@@ -161,9 +160,6 @@ def check_system_tools(need_docker: bool) -> None:
         ("composer",["composer", "--version"]),
         ("git",     ["git", "--version"]),
     ]
-    if need_docker:
-        required.append(("docker",         ["docker", "--version"]))
-        required.append(("docker compose", ["docker", "compose", "version"]))
 
     missing = []
     for name, cmd in required:
@@ -753,10 +749,6 @@ def run_verify() -> bool:
     return overall in ("READY", "OK", "DEGRADED")
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# moodle bring-up
-# ──────────────────────────────────────────────────────────────────────────────
-
 def moodle_is_running(site_url: str) -> bool:
     try:
         with urllib.request.urlopen(site_url, timeout=4) as r:
@@ -765,119 +757,17 @@ def moodle_is_running(site_url: str) -> bool:
         return False
 
 
-def prepare_moodle_for_docker(state: dict) -> bool:
-    """Copy moodle-docker's config template into the Moodle checkout.
-
-    moodle-docker requires a config.php at MOODLE_DOCKER_WWWROOT before the
-    first 'up'. With the new public/ layout the config still lives at the
-    root (parent of public/), and moodle-docker handles the docroot
-    redirection from there.
-    """
-    moodle_dir = Path(state["moodle_dir"])
-    docker_dir = Path(state["docker_dir"])
-    template   = docker_dir / "config.docker-template.php"
-    config_php = moodle_dir / "config.php"
-
-    if config_php.exists():
-        ok(f"config.php already present at {config_php}")
-        return True
-    if not template.exists():
-        fail(f"moodle-docker config template not found: {template}")
-        return False
-    info(f"Copying config template → {config_php}")
-    shutil.copy(template, config_php)
-    ok("config.php in place")
-    return True
-
-
-def docker_env(state: dict) -> dict:
-    """Build an env dict with everything moodle-docker needs, exported."""
-    host_moodle_dir = str(HOST_WORKSPACE_ROOT / "moodle_src" / "moodle")
-    host_docker_dir = str(HOST_WORKSPACE_ROOT / "moodle_src" / "moodle-docker")
-    return {
-        **os.environ,
-        "MOODLE_DIR":             state["moodle_dir"],
-        "MOODLE_DOCKER_WWWROOT":  host_moodle_dir,
-        "MOODLE_DOCKER_DIR":      host_docker_dir,
-        "MOODLE_DOCKER_DB":       state.get("moodle_docker_db", "pgsql"),
-    }
-
-
-def bring_up_moodle(state: dict) -> bool:
-    """Run ./bin/up and (if Moodle isn't installed yet) ./bin/install.
-
-    Returns True on success.
-    """
-    banner("Bringing up Moodle")
-    harness = AI_ROOT / HARNESS
-    bin_up      = harness / "bin" / "up"
-    bin_install = harness / "bin" / "install"
-
-    if not bin_up.exists():
-        fail(f"{bin_up} not found — moodle_claude harness missing or broken")
-        return False
-
-    if not prepare_moodle_for_docker(state):
-        return False
-
-    env = docker_env(state)
-
-    info("Starting Docker stack (./bin/up)")
-    if subprocess.run([str(bin_up)], cwd=harness, env=env, check=False).returncode != 0:
-        fail("./bin/up failed — check Docker daemon and moodle-docker config")
-        return False
-    ok("Docker stack up")
-
-    # Wait briefly for the webserver to start responding before deciding install.
-    site_url = state["site_url"]
-    info(f"Waiting for {site_url} to respond ...")
-    import time
-    for _ in range(20):  # up to ~40s
-        if moodle_is_running(site_url):
-            break
-        time.sleep(2)
-
-    # If Moodle already responds AND has been installed before, skip install.
-    # We treat "responds with non-error" as installed; ./bin/install would
-    # fail on an already-installed site, so this matters.
-    if moodle_is_running(site_url):
-        # Try to detect "needs install" by checking if it returns the install page
-        try:
-            with urllib.request.urlopen(site_url, timeout=4) as r:
-                body = r.read(4096).decode("utf-8", errors="ignore").lower()
-            if "install" in body and ("moodle" not in body or "installation" in body):
-                pass  # looks like an install page
-            else:
-                ok(f"Moodle already installed at {site_url} (skipping ./bin/install)")
-                return True
-        except Exception:
-            pass
-
-    info("Installing Moodle (./bin/install) — typically 3-5 minutes")
-    if subprocess.run([str(bin_install)], cwd=harness, env=env, check=False).returncode != 0:
-        fail("./bin/install failed — check the harness output above")
-        return False
-    ok("Moodle installed")
-
-    # Final check
-    if not moodle_is_running(site_url):
-        fail(f"Install reported success but {site_url} still not responding")
-        return False
-    ok(f"Moodle reachable at {site_url}")
-    return True
-
-
 # ──────────────────────────────────────────────────────────────────────────────
 # phases
 # ──────────────────────────────────────────────────────────────────────────────
 
-def phase1(state: dict, rebuild: set[str], manage_moodle_docker: bool) -> dict:
+def phase1(state: dict, rebuild: set[str]) -> dict:
     """Step 1 of 2 — everything that doesn't require Moodle to be running."""
     banner("Step 1 of 2 — install tools and build static resources")
     info("This step does not need Moodle running. It installs the 5 tools,")
     info("builds the docs DB and code index, and writes config files.")
     info("Step 2 (sitemap crawl) runs after you bring up Moodle.")
-    check_system_tools(need_docker=False)
+    check_system_tools()
     ensure_tool_repos_present()
     state = configure_instance(state)
 
@@ -922,17 +812,6 @@ def phase1(state: dict, rebuild: set[str], manage_moodle_docker: bool) -> dict:
   user and crawls authenticated pages, which can only happen against a
   real running install.
 """)
-    if manage_moodle_docker:
-        if yes_no(
-            "Bring up Moodle now (./bin/up + ./bin/install) and continue to step 2?",
-            default=True,
-        ):
-            if bring_up_moodle(state):
-                print()
-                return phase2(state, rebuild, manage_moodle_docker)
-            fail("Moodle bring-up failed. Fix the issue and re-run setup.py.")
-            return state
-
     print(f"""
   External infra path — bring up Moodle outside setup.py and re-run setup.py:
 
@@ -945,13 +824,13 @@ def phase1(state: dict, rebuild: set[str], manage_moodle_docker: bool) -> dict:
     return state
 
 
-def phase2(state: dict, rebuild: set[str], manage_moodle_docker: bool) -> dict:
+def phase2(state: dict, rebuild: set[str]) -> dict:
     """Step 2 of 2 — sitemap crawl + final verify. Requires Moodle running."""
     banner("Step 2 of 2 — crawl Moodle and verify")
     info("This step logs into your running Moodle, crawls authenticated")
     info("pages to build the sitemap, points the orchestrator at it, and")
     info("runs a final verify so you can see which capabilities are usable.")
-    check_system_tools(need_docker=manage_moodle_docker)
+    check_system_tools()
     ensure_tool_repos_present()
 
     # Always regenerate harness config so changes to the template (e.g. new
@@ -961,16 +840,9 @@ def phase2(state: dict, rebuild: set[str], manage_moodle_docker: bool) -> dict:
 
     if not moodle_is_running(state["site_url"]):
         warn(f"Moodle is not running at {state['site_url']}.")
-        if manage_moodle_docker and yes_no(
-            "Bring it up now (./bin/up + ./bin/install if needed)?",
-            default=True,
-        ):
-            if not bring_up_moodle(state):
-                sys.exit(1)
-        else:
-            info("Bring Moodle up outside setup.py and re-run setup.py.")
-            info("Example: docker compose up -d")
-            sys.exit(1)
+        info("Bring Moodle up outside setup.py and re-run setup.py.")
+        info("Example: docker compose up -d")
+        sys.exit(1)
     else:
         ok(f"Moodle reachable at {state['site_url']}")
 
@@ -1048,11 +920,6 @@ def main() -> None:
     rb = sub.add_parser("rebuild", help="force rebuild of one or more resources")
     rb.add_argument("targets", nargs="+",
                     choices=["devdocs", "indexer", "sitemap", "all"])
-    parser.add_argument(
-        "--manage-moodle-docker",
-        action="store_true",
-        help="let setup.py run moodle-docker bin/up and bin/install (disabled by default)",
-    )
     args = parser.parse_args()
 
     if args.cmd == "status":
@@ -1072,18 +939,17 @@ def main() -> None:
         return
 
     rebuild = set(getattr(args, "targets", []) or [])
-    manage_moodle_docker = bool(getattr(args, "manage_moodle_docker", False))
 
     state = load_state()
     if not state.get("phase1_complete"):
-        state = phase1(state, rebuild, manage_moodle_docker)
+        state = phase1(state, rebuild)
         # if phase1 finished and Moodle happens to already be running, continue to phase2
         if state.get("phase1_complete") and moodle_is_running(state.get("site_url", "")):
-            phase2(state, rebuild, manage_moodle_docker)
+            phase2(state, rebuild)
         return
 
     if not state.get("phase2_complete"):
-        phase2(state, rebuild, manage_moodle_docker)
+        phase2(state, rebuild)
         return
 
     # both phases complete — re-verify
