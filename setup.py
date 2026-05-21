@@ -634,8 +634,14 @@ def write_vscode_workspace(state: dict) -> Path:
     /var/www/ai/ is listed first so it becomes the default cwd for the
     integrated terminal — meaning CLAUDE.md and .claude/settings.json
     auto-load when Claude Code starts.
+
+    Two files are written:
+      - <instance>.code-workspace  : rutas internas del contenedor (Claude Code dentro del harness)
+      - host-<instance>.code-workspace : rutas del host (VS Code local en macOS)
     """
     instance_name = Path(state["instance"]).name
+
+    # ── fichero para Claude Code dentro del contenedor (rutas internas) ──
     ws_path = DATA_DIR / f"{instance_name}.code-workspace"
     ws = {
         "folders": [
@@ -648,7 +654,25 @@ def write_vscode_workspace(state: dict) -> Path:
         },
     }
     ws_path.write_text(json.dumps(ws, indent=2))
-    ok(f"Workspace file: {ws_path}")
+    ok(f"Workspace file (container): {ws_path}")
+
+    # ── fichero para VS Code del host (rutas de macOS) ──
+    host_moodle_dir = str(HOST_WORKSPACE_ROOT / "moodle_src" / "moodle")
+    host_docker_dir = str(HOST_WORKSPACE_ROOT / "moodle_src" / "moodle-docker")
+    host_ws_path = DATA_DIR / f"host-{instance_name}.code-workspace"
+    host_ws = {
+        "folders": [
+            {"path": str(HOST_WORKSPACE_ROOT),  "name": "Agentic tools (ai)"},
+            {"path": host_moodle_dir,           "name": f"Moodle source ({instance_name})"},
+            {"path": host_docker_dir,           "name": f"moodle-docker ({instance_name})"},
+        ],
+        "settings": {
+            "terminal.integrated.cwd": str(HOST_WORKSPACE_ROOT),
+        },
+    }
+    host_ws_path.write_text(json.dumps(host_ws, indent=2))
+    ok(f"Workspace file (host):      {host_ws_path}")
+
     return ws_path
 
 
